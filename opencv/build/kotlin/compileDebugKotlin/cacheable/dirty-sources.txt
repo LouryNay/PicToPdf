@@ -1,0 +1,2 @@
+C:\Users\melin\AndroidStudioProjects\DocScanner\opencv\java\src\org\opencv\core\MatAt.kt
+C:\Users\melin\AndroidStudioProjects\DocScanner\opencv\java\src\org\opencv\core\MatMatMul.kt

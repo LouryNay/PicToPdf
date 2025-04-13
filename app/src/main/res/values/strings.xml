@@ -2,4 +2,6 @@
     <string name="app_name">DocScanner</string>
     <string name="title_activity_load">LoadActivity</string>
     <string name="title_activity_home">Home</string>
+    <string name="title_activity_analysis">AnalysisActivity</string>
+    <string name="title_activity_edit">EditActivity</string>
 </resources>
