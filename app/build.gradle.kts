@@ -60,5 +60,7 @@ dependencies {
     debugImplementation(libs.androidx.ui.test.manifest)
     implementation(libs.mlkit.text.recognition)
     implementation ("org.opencv:opencv:4.11.0")
+    implementation (libs.itext7.core)
+
 
 }
