@@ -37,6 +37,7 @@ import org.opencv.android.OpenCVLoader
 import org.opencv.android.Utils
 import org.opencv.core.Core
 import org.opencv.core.Mat
+import org.opencv.core.MatOfDouble
 import org.opencv.core.MatOfPoint
 import org.opencv.core.MatOfPoint2f
 import org.opencv.core.Point
@@ -126,16 +127,20 @@ class AnalysisActivity : ComponentActivity() {
         val hsv = Mat()
         Imgproc.cvtColor(mat, hsv, Imgproc.COLOR_RGB2HSV)
 
-        // Définir une plage pour la couleur bleue
-        val lowerBlue = Scalar(100.0, 100.0, 100.0)  // Ajustez selon vos besoins
-        val upperBlue = Scalar(140.0, 255.0, 255.0)  // Ajustez selon vos besoins
+        // Utiliser un seuil de saturation plutôt que de cibler une couleur spécifique
+        val saturationMask = Mat()
+        Core.extractChannel(hsv, saturationMask, 1)  // Canal de saturation
 
-        val blueMask = Mat()
-        Core.inRange(hsv, lowerBlue, upperBlue, blueMask)
+        // Créer un masque pour les zones à saturation élevée
+        Imgproc.threshold(saturationMask, saturationMask, 80.0, 255.0, Imgproc.THRESH_BINARY)
 
-        // Trouver les contours des zones bleues
+        // Opérations morphologiques pour nettoyer le masque
+        val kernel = Imgproc.getStructuringElement(Imgproc.MORPH_RECT, Size(5.0, 5.0))
+        Imgproc.morphologyEx(saturationMask, saturationMask, Imgproc.MORPH_CLOSE, kernel)
+
+        // Trouver les contours
         val contours = mutableListOf<MatOfPoint>()
-        Imgproc.findContours(blueMask, contours, Mat(), Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE)
+        Imgproc.findContours(saturationMask, contours, Mat(), Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE)
 
         val invertedTextRegions = mutableListOf<SimpleRect>()
 
@@ -143,14 +148,23 @@ class AnalysisActivity : ComponentActivity() {
             val rect = Imgproc.boundingRect(contour)
             val area = rect.width * rect.height
 
-            // Filtrer par taille (ajustez selon vos besoins)
-            if (area > mat.width() * mat.height() * 0.01) {
-                invertedTextRegions.add(SimpleRect.from(rect))
+            // Filtrer par taille
+            if (area > mat.width() * mat.height() * 0.005 && area < mat.width() * mat.height() * 0.2) {
+                // Vérifier la luminosité moyenne dans la zone (pour confirmer qu'il s'agit d'une zone colorée)
+                val roi = Mat(mat, rect)
+                val mean = Core.mean(roi)
+
+                // Si la luminosité moyenne est assez élevée (fond coloré probable)
+                if (mean.`val`[0] + mean.`val`[1] + mean.`val`[2] > 150 * 3) {
+                    invertedTextRegions.add(SimpleRect.from(rect))
+                }
+
+                roi.release()
             }
         }
 
         hsv.release()
-        blueMask.release()
+        saturationMask.release()
 
         return invertedTextRegions
     }
@@ -184,6 +198,7 @@ class AnalysisActivity : ComponentActivity() {
         return resultBitmap
     }
 
+
     private fun correctPerspective(bitmap: Bitmap): Bitmap {
         val mat = Mat()
         Utils.bitmapToMat(bitmap, mat)
@@ -192,39 +207,70 @@ class AnalysisActivity : ComponentActivity() {
         val gray = Mat()
         Imgproc.cvtColor(mat, gray, Imgproc.COLOR_RGB2GRAY)
 
-        // Détection des bords
+        // Appliquer un flou gaussien pour réduire le bruit
+        Imgproc.GaussianBlur(gray, gray, Size(5.0, 5.0), 0.0)
+
+        // Améliorer le contraste pour mieux détecter les bords
+        val enhanced = Mat()
+        Imgproc.equalizeHist(gray, enhanced)
+
+        // Détection des bords avec des seuils plus adaptés
         val edges = Mat()
-        Imgproc.Canny(gray, edges, 75.0, 200.0)
+        Imgproc.Canny(enhanced, edges, 50.0, 150.0)  // Valeurs ajustées
 
         // Dilatation pour renforcer les bords
-        val kernel = Imgproc.getStructuringElement(Imgproc.MORPH_RECT, Size(3.0, 3.0))
+        val kernel = Imgproc.getStructuringElement(Imgproc.MORPH_RECT, Size(5.0, 5.0))  // Kernel plus grand
         Imgproc.dilate(edges, edges, kernel)
 
-        // Trouver les contours
+        // Trouver les contours en mode EXTERNAL
         val contours = mutableListOf<MatOfPoint>()
         Imgproc.findContours(edges, contours, Mat(), Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE)
-
-        // Trier les contours par aire (du plus grand au plus petit)
-        contours.sortByDescending { Imgproc.contourArea(it) }
 
         // Aucun contour trouvé
         if (contours.isEmpty()) {
             gray.release()
             edges.release()
+            enhanced.release()
+            return bitmap
+        }
+
+        // Filtrer les contours par aire pour garder seulement les grands contours
+        var largestContour: MatOfPoint? = null
+        var maxArea = 0.0
+
+        for (contour in contours) {
+            val area = Imgproc.contourArea(contour)
+            if (area > maxArea && area > bitmap.width * bitmap.height * 0.2) {  // Au moins 20% de l'image
+                maxArea = area
+                largestContour = contour
+            }
+        }
+
+        // Si pas de contour assez grand trouvé
+        if (largestContour == null) {
+            gray.release()
+            edges.release()
+            enhanced.release()
             return bitmap
         }
 
         // Approximer le contour pour trouver le rectangle du document
-        val largest = contours[0]
-        val peri = Imgproc.arcLength(MatOfPoint2f(*largest.toArray()), true)
+        val peri = Imgproc.arcLength(MatOfPoint2f(*largestContour.toArray()), true)
         val approx = MatOfPoint2f()
-        Imgproc.approxPolyDP(MatOfPoint2f(*largest.toArray()), approx, 0.02 * peri, true)
+        Imgproc.approxPolyDP(MatOfPoint2f(*largestContour.toArray()), approx, 0.02 * peri, true)
 
-        // Si nous n'avons pas un quadrilatère, retourner l'image originale
+        // Si nous n'avons pas un quadrilatère, essayer avec une plus grande approximation
         if (approx.rows() != 4) {
-            gray.release()
-            edges.release()
-            return bitmap
+            // Essayer avec un epsilon plus grand
+            Imgproc.approxPolyDP(MatOfPoint2f(*largestContour.toArray()), approx, 0.05 * peri, true)
+
+            // Si toujours pas un quadrilatère, retourner l'image originale
+            if (approx.rows() != 4) {
+                gray.release()
+                edges.release()
+                enhanced.release()
+                return bitmap
+            }
         }
 
         // Trouver les coordonnées des coins
@@ -422,9 +468,11 @@ class AnalysisActivity : ComponentActivity() {
                     mergedTextZones.add(textZones[group[0]])
                     mergedTexts.add(texts[group[0]])
                 } else {
-                    // Trier les blocs de gauche à droite puis de haut en bas
+
                     val sortedIndices = group.sortedWith(compareBy(
-                        { textZones[it].y },
+                        // D'abord par ligne (regrouper les blocs qui sont approximativement sur la même ligne)
+                        { (textZones[it].y / (textZones[it].height * 0.8)).toInt() },
+                        // Ensuite par position horizontale dans chaque ligne
                         { textZones[it].x }
                     ))
 
@@ -459,11 +507,56 @@ class AnalysisActivity : ComponentActivity() {
                 }
             }
 
-            // Remplacer les listes originales par les listes fusionnées
+
+            // Organisation des blocs par positions relatives
+            val organizedZones = mutableListOf<SimpleRect>()
+            val organizedTexts = mutableListOf<String>()
+
+            // Grouper les blocs par lignes (blocs avec des positions Y similaires)
+            val lineGroups = mutableListOf<MutableList<Int>>()
+            val lineThreshold = bitmap.height * 0.02  // 2% de la hauteur de l'image
+
+            for (i in textZones.indices) {
+                var foundGroup = false
+
+                // Trouver une ligne existante où ce bloc pourrait s'intégrer
+                for (group in lineGroups) {
+                    val firstBlockInGroup = textZones[group[0]]
+                    // Si ce bloc est à peu près à la même hauteur que les blocs de ce groupe
+                    if (Math.abs(textZones[i].y - firstBlockInGroup.y) < lineThreshold) {
+                        group.add(i)
+                        foundGroup = true
+                        break
+                    }
+                }
+
+                // Si aucun groupe existant ne convient, créer un nouveau groupe
+                if (!foundGroup) {
+                    lineGroups.add(mutableListOf(i))
+                }
+            }
+
+            // Trier les groupes par position Y (de haut en bas)
+            lineGroups.sortBy { group -> textZones[group[0]].y }
+
+            // Pour chaque ligne, trier les blocs de gauche à droite
+            for (group in lineGroups) {
+                group.sortBy { textZones[it].x }
+
+                // Ajouter les blocs triés à nos listes organisées
+                for (idx in group) {
+                    organizedZones.add(textZones[idx])
+                    organizedTexts.add(texts[idx])
+                }
+            }
+
+            // Remplacer les listes originales par les listes organisées
             textZones.clear()
-            textZones.addAll(mergedTextZones)
+            textZones.addAll(organizedZones)
             texts.clear()
-            texts.addAll(mergedTexts)
+            texts.addAll(organizedTexts)
+
+
 
             Log.d(TAG, "Après fusion: ${textZones.size} paragraphes")
 
@@ -496,16 +589,39 @@ class AnalysisActivity : ComponentActivity() {
                 val rect = Imgproc.boundingRect(contour)
                 val area = rect.width * rect.height
 
-                // Ignorer les contours trop petits
-                if (area < bitmap.width * bitmap.height * 0.01) continue // Au moins 1% de l'image
+                // Ignorer les contours trop petits ou trop grands
+                val minArea = bitmap.width * bitmap.height * 0.02  // Au moins 2% de l'image
+                val maxArea = bitmap.width * bitmap.height * 0.7   // Pas plus de 70% de l'image
+
+                if (area < minArea || area > maxArea) continue
+
+                // Ignorer les rectangles qui touchent les bords de l'image (probablement fond)
+                val margin = 5  // Marge en pixels
+                if (rect.x <= margin || rect.y <= margin ||
+                    rect.x + rect.width >= bitmap.width - margin ||
+                    rect.y + rect.height >= bitmap.height - margin) {
+                    continue
+                }
 
                 val imageRect = SimpleRect.from(rect)
 
-                // Vérifier que cette zone n'est pas déjà couverte par une zone de texte
-                if (!isOverlappingWithTextZones(imageRect, textZones, 0.7)) {
+                // Vérifier la variance des couleurs dans cette région
+                val roi = Mat(processed, org.opencv.core.Rect(rect.x, rect.y, rect.width, rect.height))
+                val stdDev = MatOfDouble()
+                val mean = MatOfDouble()
+                Core.meanStdDev(roi, mean, stdDev)
+
+                // Une image a généralement plus de variance de couleur qu'une zone unie
+                val hasEnoughVariance = stdDev.get(0, 0)[0] > 20.0 ||
+                        stdDev.get(1, 0)[0] > 20.0 ||
+                        stdDev.get(2, 0)[0] > 20.0
+
+                if (hasEnoughVariance && !isOverlappingWithTextZones(imageRect, textZones, 0.5)) {
                     imageZones.add(imageRect)
                     Log.d(TAG, "Zone d'image détectée: ${rect.x},${rect.y},${rect.width},${rect.height}")
                 }
+
+                roi.release()
             }
 
             // 4. Si aucune zone d'image n'est détectée, essayer une approche alternative
@@ -585,10 +701,10 @@ class AnalysisActivity : ComponentActivity() {
     }
 
     private fun areBlocksInSameParagraph(block1: SimpleRect, block2: SimpleRect): Boolean {
-        // Facteurs de seuil à ajuster selon vos besoins
-        val verticalOverlapThreshold = 0.3 // Chevauchement vertical minimum
-        val horizontalGapThreshold = 50    // Espacement horizontal maximum
-        val heightRatioThreshold = 1.5     // Ratio maximum de hauteur acceptable
+        // Amélioration des seuils
+        val verticalOverlapThreshold = 0.5  // Augmenté pour exiger plus de chevauchement
+        val horizontalGapThreshold = 30     // Réduit pour être plus strict sur l'espacement
+        val heightRatioThreshold = 1.3      // Réduit pour assurer plus de cohérence en hauteur
 
         // Vérifier si les hauteurs sont similaires
         val heightRatio = maxOf(block1.height.toFloat() / block2.height,
